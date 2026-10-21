@@ -1,0 +1,7 @@
+# Git no versiona directorios vacíos.
+# Este archivo mantiene `public/` en el repositorio para que:
+#   1. exista tras un `git clone` limpio (CI, Vercel, Docker),
+#   2. el `COPY --from=builder /app/public ./public` del Dockerfile no falle,
+#   3. `public/` sea una ruta válida al subir el build como artefacto.
+#
+# Los recursos estáticos reales (favicon, imágenes, audio) van en esta carpeta.

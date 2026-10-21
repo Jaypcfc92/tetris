@@ -1,0 +1,127 @@
+name: CD
+
+# ---------------------------------------------------------------------------
+# Entrega Continua (CD)
+# Se dispara cuando la rama principal (main) recibe un push.
+# 1. Reconstruye y verifica el código (misma tubería que CI).
+# 2. Publica el build como artefacto.
+# 3. Despliega en Vercel (si el proyecto está configurado con los secrets).
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# NO se cancelan ejecuciones en curso: dos despliegues simultáneos a
+# producción generarían conflictos de versión.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build de producción
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 1. Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: 2. Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: 3. Instalar dependencias (npm ci)
+        run: npm ci --no-audit --no-fund
+
+      # Puerta de calidad: si los tests fallan, el build y el deploy se detienen.
+      - name: 4. Ejecutar pruebas (npm test)
+        run: npm test
+
+      - name: 5. Compilar para producción (npm run build)
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+
+      - name: 6. Publicar el build como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-production
+          path: |
+            .next
+            !.next/cache
+            public
+          # `.next` es un directorio oculto (empieza por `.`): sin este flag
+          # upload-artifact@v4 lo excluye y el artefacto sale vacío.
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
+
+  deploy:
+    name: Desplegar en Vercel
+    needs: build # solo se despliega si el build fue exitoso
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # `vars` sí está disponible en el `if` de nivel de job (a diferencia de
+    # `secrets`). Crear la variable de repositorio VERCEL_ENABLED=true
+    # habilita el despliegue; si no existe, el job se omite y el workflow
+    # termina en verde.
+    if: ${{ vars.VERCEL_ENABLED == 'true' }}
+
+    # "production" puede requerir aprobación manual o revisores:
+    # Settings > Environments > production > Required reviewers.
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+
+    steps:
+      - name: 1. Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: 2. Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: 3. Instalar el CLI de Vercel
+        run: npm install --global vercel@latest
+
+      - name: 4. Descargar la configuración del proyecto en Vercel
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: 5. Construir con el entorno de producción
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          NEXT_TELEMETRY_DISABLED: 1
+
+      - name: 6. Desplegar
+        id: deploy
+        run: |
+          set -euo pipefail
+          vercel deploy --prebuilt --prod --yes --token=${{ secrets.VERCEL_TOKEN }} | tee vercel-deploy.log
+          url=$(grep -oE 'https://[^ ]+' vercel-deploy.log | head -1 || true)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: 7. Resumen del despliegue
+        run: |
+          echo "Producción actualizada: ${{ steps.deploy.outputs.url }}"
+          echo "Commit: ${{ github.sha }}"

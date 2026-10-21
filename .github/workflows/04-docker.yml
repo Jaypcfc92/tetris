@@ -1,0 +1,70 @@
+name: Docker Image
+
+# ---------------------------------------------------------------------------
+# Publicación de la imagen de contenedores en GitHub Container Registry (GHCR)
+# Se ejecuta al hacer push a main, al publicar un tag y de forma manual.
+# Usa GITHUB_TOKEN, por lo que no requiere secrets adicionales.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # permiso para publicar la imagen en GHCR
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Construir y publicar imagen
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 1. Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: 2. Preparar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 3. Autenticarse en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 4. Normalizar el nombre de la imagen (GHCR exige minúsculas)
+        id: image
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: 5. Calcular los tags de la imagen
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # GHCR exige nombres en minúsculas: 202602-Cloud-computing/... -> 202602-cloud-computing/...
+          images: ghcr.io/${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=
+            type=ref,event=tag
+          labels: |
+            org.opencontainers.image.title=Neon Tetris
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: 6. Construir y publicar la imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Capa de caché entre ejecuciones: builds más rápidos.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

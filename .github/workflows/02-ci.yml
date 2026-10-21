@@ -1,0 +1,93 @@
+name: CI
+
+# ---------------------------------------------------------------------------
+# Integración Continua (CI)
+# Se ejecuta en cada push y en cada Pull Request.
+# Objetivo: validar el código (tests, tipos, lint) y comprobar que el
+# proyecto compila para producción antes de permitir el merge / despliegue.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch: # ejecución manual desde la pestaña "Actions"
+
+permissions:
+  contents: read
+
+# Si llega un push nuevo a la misma rama, se cancela el run anterior:
+# ahorra minutos de runner y siempre queda el resultado del código más reciente.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validar (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      # false = una versión de Node que falle no cancela la otra;
+      # así se ve el alcance real del problema en toda la matriz.
+      fail-fast: false
+      matrix:
+        node-version: ["20.x", "22.x"]
+        node-label: ["20", "22"]
+
+    steps:
+      # 1. Descargar el código del repositorio -----------------------------
+      - name: 1. Descargar el código del repositorio
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # historial completo (útil para git diff y changelogs)
+
+      # 2. Preparar Node.js -------------------------------------------------
+      - name: 2. Preparar Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          # cache: npm reutiliza la carpeta ~/.npm entre ejecuciones
+          # (se invalida solo si cambia package-lock.json).
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # 3. Instalar dependencias con npm ci ---------------------------------
+      - name: 3. Instalar dependencias (npm ci)
+        run: npm ci --no-audit --no-fund
+        # npm ci instala exactamente lo que dice package-lock.json y falla
+        # si package.json y el lock file no están sincronizados.
+
+      # 4. Ejecutar las pruebas unitarias ----------------------------------
+      - name: 4. Ejecutar pruebas (npm test)
+        run: npm test
+
+      # Validaciones extra de calidad del código --------------------------
+      - name: 5. Verificar tipos (npm run typecheck)
+        run: npm run typecheck
+
+      - name: 6. Analizar el código (npm run lint)
+        run: npm run lint
+
+      # 5. Compilar para producción ----------------------------------------
+      - name: 7. Compilar para producción (npm run build)
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1 # sin envío de telemetría a Vercel
+
+      # Evidencia del build: el artefacto queda disponible en el run -------
+      - name: Subir el build como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-build-node-${{ matrix.node-label }}
+          path: |
+            .next
+            !.next/cache
+            public
+          # `.next` es un directorio oculto (empieza por `.`): sin este flag
+          # upload-artifact@v4 lo excluye y el artefacto sale vacío.
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: error
